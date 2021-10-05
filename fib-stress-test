@@ -1,0 +1,6 @@
+#! /usr/bin/sh
+
+printf '0 dup print 1 dup print '
+for i in {0..9999}; do
+  printf 'over over + dup print '
+done;

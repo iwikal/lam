@@ -1,0 +1,7 @@
+let fib =
+  over over +
+  dup print
+;
+
+
+0 1 fib fib fib fib fib fib fib fib fib fib fib
