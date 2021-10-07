@@ -3,3 +3,11 @@ let 2 square = 4;
 let 3 square = 9;
 
 2 square print
+
+let 0 is_zero = 1;
+let n is_zero = 0;
+
+let a b equal = a b - is_zero;
+
+8 9 equal print
+9 9 equal print
