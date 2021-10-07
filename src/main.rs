@@ -302,6 +302,16 @@ where
                 let a = stack.pop().expect("operator '-' expected two arguments, 1 supplied");
                 stack.push(a.wrapping_sub(b));
             }
+            Token::Char('*') => {
+                let b = stack.pop().expect("operator '/' expected two arguments, 0 supplied");
+                let a = stack.pop().expect("operator '/' expected two arguments, 1 supplied");
+                stack.push(a * b);
+            }
+            Token::Char('/') => {
+                let b = stack.pop().expect("operator '/' expected two arguments, 0 supplied");
+                let a = stack.pop().expect("operator '/' expected two arguments, 1 supplied");
+                stack.push(a / b);
+            }
             Token::Char(ch) => {
                 panic!("unexpected character {}", ch);
             }

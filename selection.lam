@@ -9,5 +9,5 @@ let n is_zero = 0;
 
 let a b equal = a b - is_zero;
 
-8 9 equal print
-9 9 equal print
+8 4 / 2 equal print
+3 3 * 9 equal print
