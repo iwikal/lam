@@ -50,6 +50,14 @@ impl<I: Iterator> Tokenizer<I> {
     }
 }
 
+fn is_ident(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
+
+fn is_ident_initial(ch: char) -> bool {
+    ch == '_' || ch.is_alphabetic()
+}
+
 impl<I> Tokenizer<I>
 where
     I: Iterator<Item = io::Result<char>>,
@@ -65,7 +73,7 @@ where
 
         loop {
             match self.chars.peek() {
-                Some(&Ok(ch)) if ch.is_alphanumeric() => {
+                Some(&Ok(ch)) if is_ident(ch) => {
                     word.push(ch);
                     self.chars.next();
                 }
@@ -110,13 +118,13 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         Some(loop {
-            match self.chars.peek()? {
+            match *self.chars.peek()? {
                 Ok(ch) if ch.is_whitespace() => {
                     self.chars.next();
                 }
-                Ok(ch) if ch.is_alphabetic() => break self.get_ident().map(Token::Ident),
+                Ok(ch) if is_ident_initial(ch) => break self.get_ident().map(Token::Ident),
                 Ok('0'..='9') => break self.get_number().map(Token::Number),
-                &Ok(ch) => {
+                Ok(ch) => {
                     self.chars.next();
                     break Ok(Token::Char(ch));
                 }
