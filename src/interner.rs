@@ -17,6 +17,12 @@ pub struct Interner {
     full_buffers: Vec<Box<str>>,
 }
 
+impl std::fmt::Debug for Interner {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Interner {{ ... }}")
+    }
+}
+
 impl Interner {
     pub fn new() -> Self {
         Self::default()
