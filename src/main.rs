@@ -149,14 +149,11 @@ impl<'a> Stackframe<'a> {
     }
 
     fn pop(&mut self) -> Option<u64> {
-        self.inner.pop()
-        /*
         if self.inner.len() > self.offset {
             self.inner.pop()
         } else {
             None
         }
-        */
     }
 
     fn remove(&mut self, count: usize) {
@@ -168,15 +165,13 @@ impl<'a> std::ops::Deref for Stackframe<'a> {
     type Target = [u64];
 
     fn deref(&self) -> &[u64] {
-        self.inner
-        // &self.inner[self.offset..]
+        &self.inner[self.offset..]
     }
 }
 
 impl<'a> std::ops::DerefMut for Stackframe<'a> {
     fn deref_mut(&mut self) -> &mut [u64] {
-        self.inner
-        // &mut self.inner[self.offset..]
+        &mut self.inner[self.offset..]
     }
 }
 
