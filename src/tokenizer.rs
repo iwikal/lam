@@ -1,6 +1,6 @@
 use crate::interner::{InternedHandle, Interner};
 use std::rc::Rc;
-use std::sync::RwLock;
+use std::cell::RefCell;
 use std::fmt;
 use std::io;
 use std::iter::Peekable;
@@ -38,14 +38,14 @@ impl<'int> fmt::Display for TokenFmt<'int> {
 
 pub struct Tokenizer<I: Iterator> {
     chars: Peekable<I>,
-    interner: Rc<RwLock<Interner>>,
+    interner: Rc<RefCell<Interner>>,
 }
 
 impl<I: Iterator> Tokenizer<I> {
     pub fn new(chars: I, interner: Interner) -> Self {
         Self {
             chars: chars.peekable(),
-            interner: Rc::new(RwLock::new(interner)),
+            interner: Rc::new(RefCell::new(interner)),
         }
     }
 }
@@ -62,14 +62,14 @@ impl<I> Tokenizer<I>
 where
     I: Iterator<Item = io::Result<char>>,
 {
-    pub fn get_interner(&self) -> &Rc<RwLock<Interner>> {
+    pub fn get_interner(&self) -> &Rc<RefCell<Interner>> {
         &self.interner
     }
 
     fn get_ident(&mut self) -> io::Result<InternedHandle> {
         let mut word = String::new();
 
-        let mut interner = self.interner.write().unwrap();
+        let mut interner = self.interner.borrow_mut();
 
         loop {
             match self.chars.peek() {

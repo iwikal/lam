@@ -1,6 +1,6 @@
 use std::collections::{HashMap, hash_map::Entry};
 use std::rc::Rc;
-use std::sync::RwLock;
+use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Write;
 use std::io;
@@ -24,7 +24,7 @@ struct Implementation<'a> {
     parameters: Vec<Parameter>,
     body: Vec<Token>,
     closure: Scopes<'a>,
-    interner: Rc<RwLock<Interner>>,
+    interner: Rc<RefCell<Interner>>,
 }
 
 impl<'a> Implementation<'a> {
@@ -35,7 +35,7 @@ impl<'a> Implementation<'a> {
     ) -> Result<HashMap<InternedHandle, Definition>, ()> {
         let format_name = || {
             let mut buf = String::new();
-            let interner = self.interner.read().unwrap();
+            let interner = self.interner.borrow();
             let _ = write!(buf, "{}", interner.lookup(name));
             buf
         };
@@ -92,7 +92,7 @@ impl<'a> Implementation<'a> {
 
 impl<'a> fmt::Display for Implementation<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let interner = self.interner.read().unwrap();
+        let interner = self.interner.borrow();
         for &param in &self.parameters {
             match param {
                 Parameter::Value(val) => write!(f, "{} -> ", val),
@@ -182,7 +182,7 @@ impl<'a> std::ops::DerefMut for Stackframe<'a> {
 
 trait Context {
     type Tokens: Iterator<Item = io::Result<Token>>;
-    fn identifiers(&self) -> &Rc<RwLock<Interner>>;
+    fn identifiers(&self) -> &Rc<RefCell<Interner>>;
     fn tokens(&mut self) -> &mut Self::Tokens;
 }
 
@@ -193,7 +193,7 @@ impl<I: Iterator<Item = io::Result<char>>> Context for Tokenizer<I> {
         self
     }
 
-    fn identifiers(&self) -> &Rc<RwLock<Interner>> {
+    fn identifiers(&self) -> &Rc<RefCell<Interner>> {
         Tokenizer::get_interner(self)
     }
 }
@@ -201,7 +201,7 @@ impl<I: Iterator<Item = io::Result<char>>> Context for Tokenizer<I> {
 type VecTokenIter<'a> =
     std::iter::Map<std::iter::Cloned<std::slice::Iter<'a, Token>>, fn(Token) -> io::Result<Token>>;
 
-struct CallContext<'v>(VecTokenIter<'v>, Rc<RwLock<Interner>>);
+struct CallContext<'v>(VecTokenIter<'v>, Rc<RefCell<Interner>>);
 
 impl<'v> Context for CallContext<'v> {
     type Tokens = VecTokenIter<'v>;
@@ -210,7 +210,7 @@ impl<'v> Context for CallContext<'v> {
         &mut self.0
     }
 
-    fn identifiers(&self) -> &Rc<RwLock<Interner>> {
+    fn identifiers(&self) -> &Rc<RefCell<Interner>> {
         &self.1
     }
 }
@@ -315,7 +315,7 @@ where
                 loop {
                     let format_ident = || {
                         let mut buf = String::new();
-                        let interner = context.identifiers().read().unwrap();
+                        let interner = context.identifiers().borrow();
                         let _ = write!(buf, "{}", interner.lookup(ident));
                         buf
                     };
