@@ -1,4 +1,0 @@
-let a b True = a;
-let a b False = b;
-
-let x not = (False) (True) x;

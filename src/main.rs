@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::rc::Rc;
 use std::sync::RwLock;
 use std::fmt;
@@ -13,25 +13,111 @@ mod tokenizer;
 use interner::{InternedHandle, Interner};
 use tokenizer::{Token, Tokenizer};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Parameter {
+    Value(u64),
+    Argument(InternedHandle),
+}
+
 #[derive(Clone)]
-struct Definition<'a> {
-    parameters: Vec<InternedHandle>,
+struct Implementation<'a> {
+    parameters: Vec<Parameter>,
     body: Vec<Token>,
     closure: Scopes<'a>,
     interner: Rc<RwLock<Interner>>,
 }
 
-impl<'a> fmt::Display for Definition<'a> {
+impl<'a> Implementation<'a> {
+    fn match_parameters(
+        &self,
+        name: InternedHandle,
+        stack: &mut Stackframe,
+    ) -> Result<HashMap<InternedHandle, Definition>, ()> {
+        let format_name = || {
+            let mut buf = String::new();
+            let interner = self.interner.read().unwrap();
+            let _ = write!(buf, "{}", interner.lookup(name));
+            buf
+        };
+
+        let stack_end_offset = stack
+            .len()
+            .checked_sub(self.parameters.len())
+            .unwrap_or_else(
+                || {
+                    panic!(
+                        "`{}` expected {} arguments, {} supplied",
+                        format_name(),
+                        self.parameters.len(),
+                        stack.len(),
+                    );
+                }
+            );
+
+        let mut taken_args = stack[stack_end_offset..].to_vec();
+
+        let mut bindings = HashMap::new();
+
+        for &param in self.parameters.iter().rev() {
+            let stack_value = taken_args.pop().unwrap();
+
+            match param {
+                Parameter::Argument(arg_name) => {
+                    let implementation = Implementation {
+                        parameters: vec![],
+                        body: vec![Token::Number(stack_value)],
+                        closure: Scopes(HashMap::new(), None),
+                        interner: Rc::clone(&self.interner),
+                    };
+
+                    let def = Definition {
+                        overloads: vec![implementation],
+                    };
+
+                    bindings.insert(arg_name, def);
+                }
+                Parameter::Value(value) => {
+                    if stack_value != value {
+                        return Err(());
+                    }
+                }
+            }
+        }
+
+        stack.remove(self.parameters.len());
+
+        Ok(bindings)
+    }
+}
+
+impl<'a> fmt::Display for Implementation<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let interner = self.interner.read().unwrap();
         for &param in &self.parameters {
-            write!(f, "{} -> ", interner.lookup(param))?;
+            match param {
+                Parameter::Value(val) => write!(f, "{} -> ", val),
+                Parameter::Argument(ident) => {
+                    let name = interner.lookup(ident);
+                    write!(f, "{} -> ", name)
+                }
+            }?;
         }
         for &token in &self.body {
             tokenizer::TokenFmt(token, &*interner).fmt(f)?;
         }
         Ok(())
     }
+}
+
+impl<'a> fmt::Debug for Implementation<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Clone)]
+struct Definition<'a> {
+    overloads: Vec<Implementation<'a>>,
 }
 
 type Scope<'a> = HashMap<InternedHandle, Definition<'a>>;
@@ -72,6 +158,10 @@ impl<'a> Stackframe<'a> {
         }
         */
     }
+
+    fn remove(&mut self, count: usize) {
+        self.inner.truncate(self.inner.len() - count)
+    }
 }
 
 impl<'a> std::ops::Deref for Stackframe<'a> {
@@ -87,25 +177,6 @@ impl<'a> std::ops::DerefMut for Stackframe<'a> {
     fn deref_mut(&mut self) -> &mut [u64] {
         self.inner
         // &mut self.inner[self.offset..]
-    }
-}
-
-struct IdentGuard<'a> {
-    lock: std::sync::RwLockReadGuard<'a, Interner>,
-    ident: &'a str,
-}
-
-impl<'a> std::ops::Deref for IdentGuard<'a> {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        self.ident
-    }
-}
-
-impl<'a> fmt::Display for IdentGuard<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.ident.fmt(f)
     }
 }
 
@@ -163,18 +234,19 @@ where
 
         match tok {
             Token::Ident(id) if id == keywords.let_ => {
-                let mut signature = vec![];
+                let mut parameters = vec![];
                 for tok in context.tokens() {
                     let tok = tok?;
                     match tok {
-                        Token::Ident(id) => signature.push(id),
+                        Token::Ident(id) => parameters.push(Parameter::Argument(id)),
+                        Token::Number(val) => parameters.push(Parameter::Value(val)),
                         Token::Char('=') => break,
                         _ => panic!("unexpected token {}", tok),
                     }
                 }
 
-                let name = match signature.pop() {
-                    Some(name) => name,
+                let name = match parameters.pop() {
+                    Some(Parameter::Argument(name)) => name,
                     _ => panic!("cannot have unnamed function"),
                 };
 
@@ -185,16 +257,26 @@ where
                     let tok = tok?;
                     match tok {
                         Token::Char(';') if level == 0 => {
-                            let Scopes(scope, outer_scopes) = &mut scopes;
-                            scope.insert(
-                                name,
-                                Definition {
-                                    parameters: signature,
-                                    body,
-                                    closure: Scopes(HashMap::clone(&*scope), *outer_scopes),
-                                    interner: Rc::clone(context.identifiers()),
-                                },
-                            );
+                            let Scopes(current_scope, outer_scopes) = &mut scopes;
+
+                            let implementation = Implementation {
+                                parameters,
+                                body,
+                                closure: Scopes(current_scope.clone(), *outer_scopes),
+                                interner: Rc::clone(context.identifiers()),
+                            };
+
+                            match current_scope.entry(name) {
+                                Entry::Vacant(entry) => {
+                                    entry.insert(Definition {
+                                        overloads: vec![implementation],
+                                    });
+                                }
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().overloads.push(implementation);
+                                }
+                            }
+
                             continue 'top_loop;
                         }
                         Token::Ident(id) if id == keywords.let_ => {
@@ -214,28 +296,16 @@ where
             Token::Ident(id) if id == keywords.print => {
                 println!("{}", stack.pop().expect("`print` expected 1 arguments, 0 supplied"));
             }
-            Token::Ident(id) if id == keywords.dup => {
-                stack.push(*stack.last().expect("`dup` expected 1 arguments, 0 supplied"));
-            }
-            Token::Ident(id) if id == keywords.swap => {
-                let len = stack.len();
-                stack.swap(len - 1, len - 2);
-            }
-            Token::Ident(id) if id == keywords.drop => {
-                match stack.pop() {
-                    Some(_) => {}
-                    None => {}
-                }
-                stack.pop().expect("`drop` expected 1 arguments, 0 supplied");
-            }
-            Token::Ident(id) if id == keywords.over => {
-                stack.push(stack[stack.len() - 2]);
-            }
             Token::Number(num) => stack.push(num),
             Token::Char('+') => {
                 let a = stack.pop().expect("operator '+' expected two arguments, 0 supplied");
                 let b = stack.pop().expect("operator '+' expected two arguments, 1 supplied");
                 stack.push(a.wrapping_add(b));
+            }
+            Token::Char('-') => {
+                let b = stack.pop().expect("operator '-' expected two arguments, 0 supplied");
+                let a = stack.pop().expect("operator '-' expected two arguments, 1 supplied");
+                stack.push(a.wrapping_sub(b));
             }
             Token::Char(ch) => {
                 panic!("unexpected character {}", ch);
@@ -251,40 +321,41 @@ where
                     };
 
                     let Scopes(scope, outer_scopes) = scopes;
-                    if let Some(def) = scope.get(&ident) {
-                        let Definition {
-                            parameters,
-                            body,
-                            closure,
-                            interner,
-                        } = def;
+                    if let Some(Definition { overloads }) = scope.get(&ident) {
+                        if let Some((bindings, spec)) = overloads.iter().find_map(
+                            |spec| match spec.match_parameters(ident, &mut stack) {
+                                Ok(bindings) => Some((bindings, spec)),
+                                Err(()) => None,
+                            }
+                        ) {
+                            let Implementation { body, closure, .. } = spec;
 
-                        let mut bindings = HashMap::new();
-                        for (i, &param) in parameters.iter().enumerate() {
-                            let def = Definition {
-                                parameters: vec![],
-                                body: vec![Token::Number(stack.pop().unwrap_or_else(|| {
-                                    panic!(
-                                        "`{}` expected {} arguments, {} supplied",
-                                        format_ident(),
-                                        parameters.len(),
-                                        i,
-                                    );
-                                }))],
-                                closure: Scopes(HashMap::new(), None),
-                                interner: Rc::clone(interner),
-                            };
+                            let tokens = body
+                                .iter()
+                                .cloned()
+                                .map(Result::Ok as _);
 
-                            bindings.insert(param, def);
+                            let inner_context = CallContext(
+                                tokens,
+                                Rc::clone(context.identifiers()),
+                            );
+                            let stackframe = stack.with_offset(stack.len());
+                            let scope = Scopes(bindings, Some(closure));
+
+                            call(
+                                inner_context,
+                                stackframe,
+                                keywords,
+                                Some(&scope),
+                            )?;
+
+                            break;
                         }
-                        let tokens = body.iter().cloned().map(Result::Ok as _);
-                        call(
-                            CallContext(tokens, Rc::clone(context.identifiers())),
-                            stack.with_offset(stack.len()),
-                            keywords,
-                            Some(&Scopes(bindings, Some(closure))),
-                        )?;
-                        break;
+                        eprintln!("no matching overload for `{}`", format_ident());
+                        for overload in overloads {
+                            eprintln!("found {}", overload);
+                        }
+                        panic!();
                     } else if let Some(outer) = outer_scopes {
                         scopes = outer;
                     } else {
@@ -299,12 +370,8 @@ where
 }
 
 struct Keywords {
-    print: InternedHandle,
-    dup: InternedHandle,
-    swap: InternedHandle,
-    drop: InternedHandle,
-    over: InternedHandle,
     let_: InternedHandle,
+    print: InternedHandle,
 }
 
 fn main() -> io::Result<()> {
@@ -312,10 +379,6 @@ fn main() -> io::Result<()> {
 
     let keywords = Keywords {
         print: interner.intern("print"),
-        dup: interner.intern("dup"),
-        swap: interner.intern("swap"),
-        drop: interner.intern("drop"),
-        over: interner.intern("over"),
         let_: interner.intern("let"),
     };
 

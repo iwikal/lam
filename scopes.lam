@@ -1,0 +1,10 @@
+let b = 1;
+
+let f =
+  let b = 2;
+  b
+;
+
+b print
+f print
+b print

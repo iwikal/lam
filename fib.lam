@@ -1,6 +1,9 @@
-let fib =
-  over over +
-  dup print
+let a b fib =
+  a print
+
+  let c = a b +;
+
+  a b c
 ;
 
 

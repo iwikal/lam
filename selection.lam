@@ -1,0 +1,5 @@
+let 1 square = 1;
+let 2 square = 4;
+let 3 square = 9;
+
+2 square print
