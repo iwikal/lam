@@ -32,7 +32,7 @@ impl Implementation {
         &self,
         name: InternedHandle,
         stack: &mut Stackframe,
-    ) -> Result<HashMap<InternedHandle, Definition>, ()> {
+    ) -> Result<Scope, ()> {
         let format_name = || {
             let mut buf = String::new();
             let interner = self.interner.borrow();
@@ -54,7 +54,7 @@ impl Implementation {
 
         let mut taken_args = stack[stack_end_offset..].to_vec();
 
-        let mut bindings = HashMap::new();
+        let mut bindings = Scope::new();
 
         for &param in self.parameters.iter().rev() {
             let stack_value = taken_args.pop().unwrap();
@@ -125,7 +125,11 @@ struct Scopes(RefCell<Scope>, Option<Rc<Scopes>>);
 
 impl Scopes {
     fn new(parent: Option<Rc<Self>>) -> Self {
-        Self(RefCell::new(HashMap::new()), parent)
+        Self::with_defs(RefCell::new(Scope::new()), parent)
+    }
+
+    fn with_defs(defs: RefCell<Scope>, parent: Option<Rc<Self>>) -> Self {
+        Self(defs, parent)
     }
 }
 
@@ -251,7 +255,7 @@ fn handle_identifier<C: Context>(
 
                         return Some((
                             inner_context,
-                            Rc::new(Scopes(RefCell::new(bindings), closure)),
+                            Rc::new(Scopes::with_defs(RefCell::new(bindings), closure)),
                         ))
                     } else {
                         panic!("no matching overload for `{}`", format_ident());
