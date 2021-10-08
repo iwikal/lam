@@ -35,7 +35,6 @@ let x y print_vector =
 let 10 outer_rec =;
 let x outer_rec =
   let 10 inner_rec =;
-
   let y inner_rec =
     x y print_vector 0x20 put
     x y ackermann put_num
@@ -43,6 +42,7 @@ let x outer_rec =
 
     y 1 + inner_rec
   ;
+
   0 inner_rec
 
   0x0a put
