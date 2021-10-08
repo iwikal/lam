@@ -6,4 +6,4 @@ let n ping =
   n pong
 ;
 
-4 ping
+0xff ping

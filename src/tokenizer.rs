@@ -8,15 +8,28 @@ use std::rc::Rc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Token {
     Ident(InternedHandle),
-    Number(u64),
+    Value(Value),
     Char(char),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Value {
+    U8(u128),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::U8(val) => write!(f, "{}", val),
+        }
+    }
 }
 
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Ident(_) => write!(f, "<identifier>"),
-            Self::Number(num) => num.fmt(f),
+            Self::Value(val) => val.fmt(f),
             Self::Char(ch) => write!(f, "'{}'", ch),
         }
     }
@@ -30,7 +43,7 @@ impl<'int> fmt::Display for TokenFmt<'int> {
 
         match tok {
             &Token::Ident(id) => write!(f, "{}", int.lookup(id)),
-            &Token::Number(num) => num.fmt(f),
+            &Token::Value(val) => val.fmt(f),
             &Token::Char(ch) => write!(f, "'{}'", ch),
         }
     }
@@ -88,25 +101,40 @@ where
         }
     }
 
-    fn get_number(&mut self) -> io::Result<u64> {
+    fn get_number(&mut self) -> io::Result<Value> {
+        let mut radix = 10;
         let mut acc = 0;
+        let mut count = 0;
 
-        loop {
+        Ok(Value::U8(loop {
             match self.chars.peek() {
-                Some(&Ok(ch)) if ch.is_ascii_digit() => {
-                    let n = ch.to_digit(10).unwrap();
-                    acc *= 10;
-                    acc += n as u64;
+                Some(&Ok('0')) if count == 0 => {
+                    self.chars.next();
+                    match self.chars.peek() {
+                        Some(Ok('x')) => {
+                            self.chars.next();
+                            radix = 0x10;
+                        }
+                        Some(&Ok(ch)) if !ch.is_ascii_digit() => break 0,
+                        _ => panic!("wrong"),
+                    }
+                }
+                Some(&Ok(ch)) if ch.is_digit(radix) => {
+                    let n = ch.to_digit(radix).unwrap();
+                    acc = u128::checked_mul(acc, radix as _)
+                        .unwrap_or_else(|| panic!("too big numeric constant"));
+                    acc += n as u128;
                     self.chars.next();
                 }
                 Some(&Ok(_)) | None => {
-                    break Ok(acc);
+                    break acc;
                 }
-                Some(&Err(_)) => {
-                    break self.chars.next().unwrap().map(|_| unreachable!());
+                Some(Err(_)) => {
+                    return self.chars.next().unwrap().map(|_| unreachable!());
                 }
             }
-        }
+            count += 1;
+        }))
     }
 }
 
@@ -123,7 +151,7 @@ where
                     self.chars.next();
                 }
                 Ok(ch) if is_ident_initial(ch) => break self.get_ident().map(Token::Ident),
-                Ok('0'..='9') => break self.get_number().map(Token::Number),
+                Ok('0'..='9') => break self.get_number().map(Token::Value),
                 Ok(ch) => {
                     self.chars.next();
                     break Ok(Token::Char(ch));

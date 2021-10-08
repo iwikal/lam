@@ -1,0 +1,52 @@
+
+let 0 n ackermann = n 1 +;
+let m 0 ackermann = m 1 - 1 ackermann;
+let m n ackermann =
+  let arg = m n 1 - ackermann;
+  m 1 - arg ackermann
+;
+
+
+
+
+
+
+
+
+let d put_digit = d 0x30 + put;
+
+let 0 put_num = 0 put_digit;
+let n put_num =
+  let 0 rec =;
+  let n rec = n put_num;
+
+  n 10 / rec
+  n n 10 / 10 * - put_digit
+;
+
+let x y print_vector =
+  0x5b put
+  x put_num
+  0x2c put
+  y put_num
+  0x5d put
+;
+
+let 10 outer_rec =;
+let x outer_rec =
+  let 10 inner_rec =;
+
+  let y inner_rec =
+    x y print_vector 0x20 put
+    x y ackermann put_num
+    0x0a put
+
+    y 1 + inner_rec
+  ;
+  0 inner_rec
+
+  0x0a put
+  x 1 + outer_rec
+;
+
+0 outer_rec

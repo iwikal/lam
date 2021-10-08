@@ -11,15 +11,15 @@ mod interner;
 mod tokenizer;
 
 use interner::{InternedHandle, Interner};
-use tokenizer::{Token, Tokenizer};
+use tokenizer::{Token, Tokenizer, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Parameter {
-    Value(u64),
-    Argument(InternedHandle),
+    Value(Value),
+    Ident(InternedHandle),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Implementation {
     parameters: Vec<Parameter>,
     body: Vec<Token>,
@@ -28,11 +28,7 @@ struct Implementation {
 }
 
 impl Implementation {
-    fn match_parameters(
-        &self,
-        name: InternedHandle,
-        stack: &mut Stackframe,
-    ) -> Result<Scope, ()> {
+    fn match_parameters(&self, name: InternedHandle, stack: &mut Stackframe) -> Result<Scope, ()> {
         let format_name = || {
             let mut buf = String::new();
             let interner = self.interner.borrow();
@@ -60,10 +56,10 @@ impl Implementation {
             let stack_value = taken_args.pop().unwrap();
 
             match param {
-                Parameter::Argument(arg_name) => {
+                Parameter::Ident(arg_name) => {
                     let implementation = Implementation {
                         parameters: vec![],
-                        body: vec![Token::Number(stack_value)],
+                        body: vec![Token::Value(stack_value)],
                         closure: None,
                         interner: Rc::clone(&self.interner),
                     };
@@ -94,7 +90,7 @@ impl fmt::Display for Implementation {
         for &param in &self.parameters {
             match param {
                 Parameter::Value(val) => write!(f, "{} -> ", val),
-                Parameter::Argument(ident) => {
+                Parameter::Ident(ident) => {
                     let name = interner.lookup(ident);
                     write!(f, "{} -> ", name)
                 }
@@ -107,20 +103,14 @@ impl fmt::Display for Implementation {
     }
 }
 
-impl fmt::Debug for Implementation {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Definition {
     overloads: Vec<Implementation>,
 }
 
 type Scope = HashMap<InternedHandle, Definition>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Scopes(RefCell<Scope>, Option<Rc<Scopes>>);
 
 impl Scopes {
@@ -133,7 +123,7 @@ impl Scopes {
     }
 }
 
-type Stack = Vec<u64>;
+type Stack = Vec<Value>;
 
 struct Stackframe<'a> {
     inner: &'a mut Stack,
@@ -145,18 +135,25 @@ impl<'a> Stackframe<'a> {
         Self { inner, offset: 0 }
     }
 
-    fn with_offset(&mut self, offset: usize) -> Stackframe {
+    fn push_frame(&mut self) -> Stackframe {
         Stackframe {
+            offset: self.offset + self.len(),
             inner: self.inner,
-            offset: self.offset + offset,
         }
     }
 
-    fn push(&mut self, val: u64) {
+    fn reset(self) -> Self {
+        Stackframe {
+            offset: self.offset + self.len(),
+            inner: self.inner,
+        }
+    }
+
+    fn push(&mut self, val: Value) {
         self.inner.push(val)
     }
 
-    fn pop(&mut self) -> Option<u64> {
+    fn pop(&mut self) -> Option<Value> {
         if self.inner.len() > self.offset {
             self.inner.pop()
         } else {
@@ -170,46 +167,55 @@ impl<'a> Stackframe<'a> {
 }
 
 impl<'a> std::ops::Deref for Stackframe<'a> {
-    type Target = [u64];
+    type Target = [Value];
 
-    fn deref(&self) -> &[u64] {
+    fn deref(&self) -> &[Value] {
         &self.inner[self.offset..]
     }
 }
 
 impl<'a> std::ops::DerefMut for Stackframe<'a> {
-    fn deref_mut(&mut self) -> &mut [u64] {
+    fn deref_mut(&mut self) -> &mut [Value] {
         &mut self.inner[self.offset..]
     }
 }
 
 trait Context {
-    type Tokens: Iterator<Item = io::Result<Token>>;
     fn identifiers(&self) -> &Rc<RefCell<Interner>>;
-    fn tokens(&mut self) -> &mut Self::Tokens;
+    fn tokens(&mut self) -> &mut dyn PeekableIterator<Item = io::Result<Token>>;
 }
 
-impl<I: Iterator<Item = io::Result<char>>> Context for Tokenizer<I> {
-    type Tokens = Tokenizer<I>;
+struct TokenContext<I: Iterator<Item = io::Result<char>>> {
+    tokens: std::iter::Peekable<Tokenizer<I>>,
+    interner: Rc<RefCell<Interner>>,
+}
 
-    fn tokens(&mut self) -> &mut Self::Tokens {
-        self
+trait PeekableIterator: Iterator {
+    fn peek(&mut self) -> Option<&Self::Item>;
+}
+
+impl<I: Iterator> PeekableIterator for std::iter::Peekable<I> {
+    fn peek(&mut self) -> Option<&Self::Item> {
+        std::iter::Peekable::peek(self)
+    }
+}
+
+impl<I: Iterator<Item = io::Result<char>>> Context for TokenContext<I> {
+    fn tokens(&mut self) -> &mut dyn PeekableIterator<Item = io::Result<Token>> {
+        &mut self.tokens
     }
 
     fn identifiers(&self) -> &Rc<RefCell<Interner>> {
-        Tokenizer::get_interner(self)
+        &self.interner
     }
 }
 
-type VecTokenIter<'a> =
-    std::iter::Map<std::iter::Cloned<std::slice::Iter<'a, Token>>, fn(Token) -> io::Result<Token>>;
+type CallContextIter = std::iter::Peekable<std::vec::IntoIter<io::Result<Token>>>;
 
-struct CallContext<'v>(VecTokenIter<'v>, Rc<RefCell<Interner>>);
+struct CallContext(CallContextIter, Rc<RefCell<Interner>>);
 
-impl<'v> Context for CallContext<'v> {
-    type Tokens = VecTokenIter<'v>;
-
-    fn tokens(&mut self) -> &mut Self::Tokens {
+impl Context for CallContext {
+    fn tokens(&mut self) -> &mut dyn PeekableIterator<Item = io::Result<Token>> {
         &mut self.0
     }
 
@@ -218,15 +224,14 @@ impl<'v> Context for CallContext<'v> {
     }
 }
 
-fn handle_identifier<C: Context>(
+fn handle_identifier(
     ident: InternedHandle,
-    context: &C,
+    context: &dyn Context,
     mut scopes: Rc<Scopes>,
     stack: &mut Stackframe,
-    keywords: &Keywords,
-) -> io::Result<()> {
+) -> io::Result<(Box<CallContext>, Rc<Scopes>)> {
     Ok(loop {
-        let Scopes(current_scope, parent_scopes) = &*scopes;
+        let Scopes(current_scope, parent_scopes) = &*(scopes);
         let format_ident = || {
             let mut buf = String::new();
             let interner = context.identifiers().borrow();
@@ -234,45 +239,34 @@ fn handle_identifier<C: Context>(
             buf
         };
 
-        {
-            if let Some((
-                inner_context,
-                inner_scope,
-            )) = {
-                current_scope.borrow().get(&ident).and_then(|def| {
-                    let mut specialization = None;
-                    for spec in &def.overloads {
-                        if let Ok(bindings) = spec.match_parameters(ident, stack) {
-                            specialization = Some((bindings, spec));
-                            break;
-                        }
+        if let Some((inner_context, inner_scope)) = {
+            current_scope.borrow().get(&ident).and_then(|def| {
+                let mut specialization = None;
+                for spec in def.overloads.iter() {
+                    if let Ok(bindings) = spec.match_parameters(ident, stack) {
+                        specialization = Some((bindings, spec));
+                        break;
                     }
-                    if let Some((bindings, spec)) = specialization {
-                        let tokens = spec.body.iter().cloned().map(Result::Ok as _);
+                }
+                if let Some((bindings, spec)) = specialization {
+                    let tokens: Vec<_> = spec.body.iter().cloned().map(Result::Ok).collect();
 
-                        let inner_context = CallContext(tokens, Rc::clone(context.identifiers()));
-                        let closure = spec.closure.as_ref().map(Rc::clone);
+                    let inner_context = CallContext(
+                        tokens.into_iter().peekable(),
+                        Rc::clone(context.identifiers()),
+                    );
+                    let closure = spec.closure.as_ref().map(Rc::clone);
 
-                        return Some((
-                            inner_context,
-                            Rc::new(Scopes::with_defs(RefCell::new(bindings), closure)),
-                        ))
-                    } else {
-                        panic!("no matching overload for `{}`", format_ident());
-                    }
-                })
-            } {
-                let stackframe = stack.with_offset(stack.len());
-
-                call(
-                    inner_context,
-                    stackframe,
-                    keywords,
-                    inner_scope,
-                )?;
-
-                break;
-            }
+                    return Some((
+                        Box::new(inner_context),
+                        Rc::new(Scopes::with_defs(RefCell::new(bindings), closure)),
+                    ));
+                } else {
+                    panic!("no matching overload for `{}`", format_ident());
+                }
+            })
+        } {
+            break (inner_context, inner_scope);
         }
 
         if let Some(outer) = parent_scopes {
@@ -284,13 +278,13 @@ fn handle_identifier<C: Context>(
     })
 }
 
-fn call<C: Context>(
-    mut context: C,
+fn call(
+    mut context: Box<dyn Context>,
     mut stack: Stackframe,
     keywords: &Keywords,
-    scopes: Rc<Scopes>,
+    mut scopes: Rc<Scopes>,
 ) -> io::Result<()> {
-    'top_loop: loop {
+    Ok('top_loop: loop {
         let tok = match context.tokens().next() {
             Some(result) => result?,
             None => break,
@@ -302,15 +296,15 @@ fn call<C: Context>(
                 for tok in context.tokens() {
                     let tok = tok?;
                     match tok {
-                        Token::Ident(id) => parameters.push(Parameter::Argument(id)),
-                        Token::Number(val) => parameters.push(Parameter::Value(val)),
+                        Token::Ident(id) => parameters.push(Parameter::Ident(id)),
+                        Token::Value(val) => parameters.push(Parameter::Value(val)),
                         Token::Char('=') => break,
                         _ => panic!("unexpected token {}", tok),
                     }
                 }
 
                 let name = match parameters.pop() {
-                    Some(Parameter::Argument(name)) => name,
+                    Some(Parameter::Ident(name)) => name,
                     _ => panic!("cannot have unnamed function"),
                 };
 
@@ -321,6 +315,7 @@ fn call<C: Context>(
                     let tok = tok?;
                     match tok {
                         Token::Char(';') if level == 0 => {
+                            body.push(tok);
                             let implementation = Implementation {
                                 parameters,
                                 body,
@@ -365,7 +360,15 @@ fn call<C: Context>(
                         .expect("`print` expected 1 arguments, 0 supplied")
                 );
             }
-            Token::Number(num) => stack.push(num),
+            Token::Ident(id) if id == keywords.put => {
+                let val = stack
+                    .pop()
+                    .expect("`print` expected 1 arguments, 0 supplied");
+                match val {
+                    Value::U8(n) => print!("{}", (n as u8) as char),
+                }
+            }
+            Token::Value(val) => stack.push(val),
             Token::Char('+') => {
                 let a = stack
                     .pop()
@@ -373,7 +376,9 @@ fn call<C: Context>(
                 let b = stack
                     .pop()
                     .expect("operator '+' expected two arguments, 1 supplied");
-                stack.push(a.wrapping_add(b));
+                match (a, b) {
+                    (Value::U8(a), Value::U8(b)) => stack.push(Value::U8(a.wrapping_add(b))),
+                }
             }
             Token::Char('-') => {
                 let b = stack
@@ -382,7 +387,9 @@ fn call<C: Context>(
                 let a = stack
                     .pop()
                     .expect("operator '-' expected two arguments, 1 supplied");
-                stack.push(a.wrapping_sub(b));
+                match (a, b) {
+                    (Value::U8(a), Value::U8(b)) => stack.push(Value::U8(a.wrapping_sub(b))),
+                }
             }
             Token::Char('*') => {
                 let b = stack
@@ -391,7 +398,9 @@ fn call<C: Context>(
                 let a = stack
                     .pop()
                     .expect("operator '/' expected two arguments, 1 supplied");
-                stack.push(a * b);
+                match (a, b) {
+                    (Value::U8(a), Value::U8(b)) => stack.push(Value::U8(a * b)),
+                }
             }
             Token::Char('/') => {
                 let b = stack
@@ -400,31 +409,46 @@ fn call<C: Context>(
                 let a = stack
                     .pop()
                     .expect("operator '/' expected two arguments, 1 supplied");
-                stack.push(a / b);
+                match (a, b) {
+                    (Value::U8(a), Value::U8(b)) => stack.push(Value::U8(a / b)),
+                }
+            }
+            Token::Char(';') => {
+                break 'top_loop;
             }
             Token::Char(ch) => {
                 panic!("unexpected character {}", ch);
             }
             Token::Ident(ident) => {
-                handle_identifier(ident, &context, Rc::clone(&scopes), &mut stack, keywords)?
+                let (inner_context, inner_scope) =
+                    handle_identifier(ident, &*context, Rc::clone(&scopes), &mut stack)?;
+
+                if let Some(Ok(Token::Char(';'))) = context.tokens().peek() {
+                    context.tokens().next();
+                    context = inner_context;
+                    stack = stack.reset();
+                    scopes = inner_scope;
+                } else {
+                    call(inner_context, stack.push_frame(), keywords, inner_scope)?;
+                }
             }
         }
-    }
-
-    Ok(())
+    })
 }
 
 struct Keywords {
     let_: InternedHandle,
     print: InternedHandle,
+    put: InternedHandle,
 }
 
 fn main() -> io::Result<()> {
     let mut interner = Interner::new();
 
     let keywords = Keywords {
-        print: interner.intern("print"),
         let_: interner.intern("let"),
+        print: interner.intern("print"),
+        put: interner.intern("put"),
     };
 
     let mut stack: Stack = vec![];
@@ -434,7 +458,10 @@ fn main() -> io::Result<()> {
     let tokens = Tokenizer::new(chars, interner);
 
     call(
-        tokens,
+        Box::new(TokenContext {
+            interner: Rc::clone(tokens.get_interner()),
+            tokens: tokens.peekable(),
+        }),
         Stackframe::from_stack(&mut stack),
         &keywords,
         Rc::new(Scopes::new(None)),
