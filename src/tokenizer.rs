@@ -1,9 +1,9 @@
 use crate::interner::{InternedHandle, Interner};
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
 use std::iter::Peekable;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Token {

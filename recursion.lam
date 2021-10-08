@@ -1,0 +1,9 @@
+let 0 ping = 0 print;
+let n ping =
+  let n pong = n 1 - ping;
+
+  n print
+  n pong
+;
+
+4 ping

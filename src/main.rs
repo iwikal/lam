@@ -1,10 +1,10 @@
-use std::collections::{HashMap, hash_map::Entry};
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::collections::{hash_map::Entry, HashMap};
 use std::fmt;
 use std::fmt::Write;
 use std::io;
 use std::io::prelude::*;
+use std::rc::Rc;
 use utf8_decode::UnsafeDecoder;
 
 mod interner;
@@ -20,14 +20,14 @@ enum Parameter {
 }
 
 #[derive(Clone)]
-struct Implementation<'a> {
+struct Implementation {
     parameters: Vec<Parameter>,
     body: Vec<Token>,
-    closure: Scopes<'a>,
+    closure: Option<Rc<Scopes>>,
     interner: Rc<RefCell<Interner>>,
 }
 
-impl<'a> Implementation<'a> {
+impl Implementation {
     fn match_parameters(
         &self,
         name: InternedHandle,
@@ -43,16 +43,14 @@ impl<'a> Implementation<'a> {
         let stack_end_offset = stack
             .len()
             .checked_sub(self.parameters.len())
-            .unwrap_or_else(
-                || {
-                    panic!(
-                        "`{}` expected {} arguments, {} supplied",
-                        format_name(),
-                        self.parameters.len(),
-                        stack.len(),
-                    );
-                }
-            );
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{}` expected {} arguments, {} supplied",
+                    format_name(),
+                    self.parameters.len(),
+                    stack.len(),
+                );
+            });
 
         let mut taken_args = stack[stack_end_offset..].to_vec();
 
@@ -66,7 +64,7 @@ impl<'a> Implementation<'a> {
                     let implementation = Implementation {
                         parameters: vec![],
                         body: vec![Token::Number(stack_value)],
-                        closure: Scopes(HashMap::new(), None),
+                        closure: None,
                         interner: Rc::clone(&self.interner),
                     };
 
@@ -90,7 +88,7 @@ impl<'a> Implementation<'a> {
     }
 }
 
-impl<'a> fmt::Display for Implementation<'a> {
+impl fmt::Display for Implementation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let interner = self.interner.borrow();
         for &param in &self.parameters {
@@ -109,21 +107,27 @@ impl<'a> fmt::Display for Implementation<'a> {
     }
 }
 
-impl<'a> fmt::Debug for Implementation<'a> {
+impl fmt::Debug for Implementation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
 #[derive(Clone)]
-struct Definition<'a> {
-    overloads: Vec<Implementation<'a>>,
+struct Definition {
+    overloads: Vec<Implementation>,
 }
 
-type Scope<'a> = HashMap<InternedHandle, Definition<'a>>;
+type Scope = HashMap<InternedHandle, Definition>;
 
 #[derive(Clone)]
-struct Scopes<'a>(Scope<'a>, Option<&'a Scopes<'a>>);
+struct Scopes(RefCell<Scope>, Option<Rc<Scopes>>);
+
+impl Scopes {
+    fn new(parent: Option<Rc<Self>>) -> Self {
+        Self(RefCell::new(HashMap::new()), parent)
+    }
+}
 
 type Stack = Vec<u64>;
 
@@ -210,17 +214,78 @@ impl<'v> Context for CallContext<'v> {
     }
 }
 
-fn call<C>(
+fn handle_identifier<C: Context>(
+    ident: InternedHandle,
+    context: &C,
+    mut scopes: Rc<Scopes>,
+    stack: &mut Stackframe,
+    keywords: &Keywords,
+) -> io::Result<()> {
+    Ok(loop {
+        let Scopes(current_scope, parent_scopes) = &*scopes;
+        let format_ident = || {
+            let mut buf = String::new();
+            let interner = context.identifiers().borrow();
+            let _ = write!(buf, "{}", interner.lookup(ident));
+            buf
+        };
+
+        {
+            if let Some((
+                inner_context,
+                inner_scope,
+            )) = {
+                current_scope.borrow().get(&ident).and_then(|def| {
+                    let mut specialization = None;
+                    for spec in &def.overloads {
+                        if let Ok(bindings) = spec.match_parameters(ident, stack) {
+                            specialization = Some((bindings, spec));
+                            break;
+                        }
+                    }
+                    if let Some((bindings, spec)) = specialization {
+                        let tokens = spec.body.iter().cloned().map(Result::Ok as _);
+
+                        let inner_context = CallContext(tokens, Rc::clone(context.identifiers()));
+                        let closure = spec.closure.as_ref().map(Rc::clone);
+
+                        return Some((
+                            inner_context,
+                            Rc::new(Scopes(RefCell::new(bindings), closure)),
+                        ))
+                    } else {
+                        panic!("no matching overload for `{}`", format_ident());
+                    }
+                })
+            } {
+                let stackframe = stack.with_offset(stack.len());
+
+                call(
+                    inner_context,
+                    stackframe,
+                    keywords,
+                    inner_scope,
+                )?;
+
+                break;
+            }
+        }
+
+        if let Some(outer) = parent_scopes {
+            let outer = Rc::clone(outer);
+            scopes = outer;
+        } else {
+            panic!("unknown identifier `{}`", format_ident());
+        }
+    })
+}
+
+fn call<C: Context>(
     mut context: C,
     mut stack: Stackframe,
     keywords: &Keywords,
-    scopes: Option<&Scopes>,
-) -> io::Result<()>
-where
-    C: Context,
-{
-    let mut scopes = Scopes(HashMap::new(), scopes);
-
+    scopes: Rc<Scopes>,
+) -> io::Result<()> {
     'top_loop: loop {
         let tok = match context.tokens().next() {
             Some(result) => result?,
@@ -252,16 +317,16 @@ where
                     let tok = tok?;
                     match tok {
                         Token::Char(';') if level == 0 => {
-                            let Scopes(current_scope, outer_scopes) = &mut scopes;
-
                             let implementation = Implementation {
                                 parameters,
                                 body,
-                                closure: Scopes(current_scope.clone(), *outer_scopes),
+                                closure: Some(Rc::clone(&scopes)),
                                 interner: Rc::clone(context.identifiers()),
                             };
 
-                            match current_scope.entry(name) {
+                            let Scopes(current_scope, _) = &*scopes;
+
+                            match current_scope.borrow_mut().entry(name) {
                                 Entry::Vacant(entry) => {
                                     entry.insert(Definition {
                                         overloads: vec![implementation],
@@ -289,84 +354,55 @@ where
                 panic!("unexpected end of file, expected {}", Token::Char(';'));
             }
             Token::Ident(id) if id == keywords.print => {
-                println!("{}", stack.pop().expect("`print` expected 1 arguments, 0 supplied"));
+                println!(
+                    "{}",
+                    stack
+                        .pop()
+                        .expect("`print` expected 1 arguments, 0 supplied")
+                );
             }
             Token::Number(num) => stack.push(num),
             Token::Char('+') => {
-                let a = stack.pop().expect("operator '+' expected two arguments, 0 supplied");
-                let b = stack.pop().expect("operator '+' expected two arguments, 1 supplied");
+                let a = stack
+                    .pop()
+                    .expect("operator '+' expected two arguments, 0 supplied");
+                let b = stack
+                    .pop()
+                    .expect("operator '+' expected two arguments, 1 supplied");
                 stack.push(a.wrapping_add(b));
             }
             Token::Char('-') => {
-                let b = stack.pop().expect("operator '-' expected two arguments, 0 supplied");
-                let a = stack.pop().expect("operator '-' expected two arguments, 1 supplied");
+                let b = stack
+                    .pop()
+                    .expect("operator '-' expected two arguments, 0 supplied");
+                let a = stack
+                    .pop()
+                    .expect("operator '-' expected two arguments, 1 supplied");
                 stack.push(a.wrapping_sub(b));
             }
             Token::Char('*') => {
-                let b = stack.pop().expect("operator '/' expected two arguments, 0 supplied");
-                let a = stack.pop().expect("operator '/' expected two arguments, 1 supplied");
+                let b = stack
+                    .pop()
+                    .expect("operator '/' expected two arguments, 0 supplied");
+                let a = stack
+                    .pop()
+                    .expect("operator '/' expected two arguments, 1 supplied");
                 stack.push(a * b);
             }
             Token::Char('/') => {
-                let b = stack.pop().expect("operator '/' expected two arguments, 0 supplied");
-                let a = stack.pop().expect("operator '/' expected two arguments, 1 supplied");
+                let b = stack
+                    .pop()
+                    .expect("operator '/' expected two arguments, 0 supplied");
+                let a = stack
+                    .pop()
+                    .expect("operator '/' expected two arguments, 1 supplied");
                 stack.push(a / b);
             }
             Token::Char(ch) => {
                 panic!("unexpected character {}", ch);
             }
             Token::Ident(ident) => {
-                let mut scopes = &scopes;
-                loop {
-                    let format_ident = || {
-                        let mut buf = String::new();
-                        let interner = context.identifiers().borrow();
-                        let _ = write!(buf, "{}", interner.lookup(ident));
-                        buf
-                    };
-
-                    let Scopes(scope, outer_scopes) = scopes;
-                    if let Some(Definition { overloads }) = scope.get(&ident) {
-                        if let Some((bindings, spec)) = overloads.iter().find_map(
-                            |spec| match spec.match_parameters(ident, &mut stack) {
-                                Ok(bindings) => Some((bindings, spec)),
-                                Err(()) => None,
-                            }
-                        ) {
-                            let Implementation { body, closure, .. } = spec;
-
-                            let tokens = body
-                                .iter()
-                                .cloned()
-                                .map(Result::Ok as _);
-
-                            let inner_context = CallContext(
-                                tokens,
-                                Rc::clone(context.identifiers()),
-                            );
-                            let stackframe = stack.with_offset(stack.len());
-                            let scope = Scopes(bindings, Some(closure));
-
-                            call(
-                                inner_context,
-                                stackframe,
-                                keywords,
-                                Some(&scope),
-                            )?;
-
-                            break;
-                        }
-                        eprintln!("no matching overload for `{}`", format_ident());
-                        for overload in overloads {
-                            eprintln!("found {}", overload);
-                        }
-                        panic!();
-                    } else if let Some(outer) = outer_scopes {
-                        scopes = outer;
-                    } else {
-                        panic!("unknown identifier `{}`", format_ident());
-                    }
-                }
+                handle_identifier(ident, &context, Rc::clone(&scopes), &mut stack, keywords)?
             }
         }
     }
@@ -393,7 +429,12 @@ fn main() -> io::Result<()> {
     let chars = UnsafeDecoder::new(bytes);
     let tokens = Tokenizer::new(chars, interner);
 
-    call(tokens, Stackframe::from_stack(&mut stack), &keywords, None)?;
+    call(
+        tokens,
+        Stackframe::from_stack(&mut stack),
+        &keywords,
+        Rc::new(Scopes::new(None)),
+    )?;
 
     Ok(())
 }

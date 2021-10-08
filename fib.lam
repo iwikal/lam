@@ -1,10 +1,18 @@
-let a b fib =
-  a print
-
-  let c = a b +;
-
-  a b c
+let x y 0 fib_rec =
+  x print
+  y print
 ;
 
+let x y n fib_rec =
+  x print
 
-0 1 fib fib fib fib fib fib fib fib fib fib fib
+  let z = x y +;
+  let m = n 1 -;
+
+  y z m fib_rec
+;
+
+let 0 fib = 0 print;
+let n fib = 0 1 n fib_rec;
+
+10 fib
